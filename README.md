@@ -1,2 +1,2 @@
 # GameSocket
-Socket Library for Game
+Socket Library for Game IN PYTHON
