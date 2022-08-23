@@ -1,32 +1,38 @@
 import sys
 import socket
 from network import network
+from typing import Callable, Any, Dict
 
 # PoC Code -------
 PORT = 12345
+
+def binder(sock: socket.socket, addr: tuple):
+    sys.stdout.write('\rconnected: %s\nMe: ' % str(addr))
+    gs.network.start_receive(rece_handler, sock)
 
 def rece_handler(msg):
     sys.stdout.write('\rThe other: %s\nMe: ' % msg)
 
 class gamesocket:
-    def __init__(self, port: int, host: str = "localhost", server: bool = False):
+    def __init__(self, port: int):
         self.network = network()
-        if server:
-            self.network.server(port, self.binder)
-        else:
-            self.network.client(host, port)
+        self.port = port
+
+    def server(self, binder: Callable[[socket.socket, tuple], Any]):
+        self.network.server(self.port, binder)
     
-    def binder(self, socket: socket.socket, addr: str):
-        sys.stdout.write('\rconnect: %s\nMe: ' % str(addr))
-        self.network.start_receive(rece_handler, socket)
+    def client(self, host: str, str_handler: Callable[[str], Any]):
+        self.network.client(host, self.port)
+        self.network.start_receive(str_handler)
 
 if __name__ == "__main__":
     if input("s or c?: ") == "s":
-        gs = gamesocket(PORT, "localhost", True)
+        gs = gamesocket(PORT)
+        gs.server(binder)
         while True:
             gs.network.sendAll(input("Me: "))
     else:
-        gs = gamesocket(PORT, "localhost")
-        gs.network.start_receive(rece_handler)
+        gs = gamesocket(PORT)
+        gs.client("localhost", rece_handler)
         while True:
             gs.network.send(input("Me: "))

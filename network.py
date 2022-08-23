@@ -1,14 +1,17 @@
+from http import client
 import socket
+from struct import pack
 import threading
 import packet
-from typing import Callable, Any, Dict
+from typing import Callable, Any, Dict, Tuple, List
 
 class network:
     def __init__(self):
         self.socket: socket.socket = None
         self.isServer = False
         self.isClient = False
-        self.clients: Dict[tuple, socket.socket] = {}
+        self.clients: Dict[str, socket.socket] = {}
+        self.anonyclients: List[socket.socket] = []
 
     def start_receive(self, str_handler: Callable[[str], Any], sock: socket.socket = None):
         """Start receive loop in other thread
@@ -23,7 +26,7 @@ class network:
         receiver.daemon = True
         receiver.start()
 
-    def receive(self, sock: socket.socket, bufsize: int) -> bytes:
+    def receive(self, sock: socket.socket) -> Tuple[bytes, packet.flags]:
         """Receive data through socket
 
         Args:
@@ -31,16 +34,18 @@ class network:
             bufsize (`int`): Receive bufsize
 
         Returns:
-            data (`bytes`): Received data
+            data, flag (`Tuple[bytes, packet.flags]`): Received data and flag
         """
         try:
-            data = sock.recv(bufsize)
+            flag: packet.flags = packet.flags(int.from_bytes(sock.recv(4), "little"))
+            length = int.from_bytes(sock.recv(4), "little")
+            data: bytes = sock.recv(length)
         except ConnectionResetError:
-            raise Exception('Disconnected')
+            raise Exception('Disconnected') # TODO: handling disconnecting client
         if not data:
             raise ValueError('Receive error')
         else:
-            return data
+            return (data, flag)
 
     def receiveLoop(self, sock: socket.socket, str_handler: Callable[[str], Any]):
         """
@@ -51,9 +56,7 @@ class network:
             string_handler (`Callable[[str], Any]`): String data handler func
         """
         while True:
-            flag: packet.flags = packet.flags(int.from_bytes(self.receive(sock, 4), "little"))
-            length = int.from_bytes(self.receive(sock, 4), "little")
-            data: bytes = self.receive(sock, length)
+            data, flag = self.receive(sock)
             if flag == packet.flags.STRING_PACKET:
                 str_handler(data.decode('utf-8'))
 
@@ -69,6 +72,29 @@ class network:
         for client_sock in self.clients.values():
             self.send(data, client_sock, flag)
 
+    def sendAllAnony(self, data: str, flag: packet.flags = packet.flags.STRING_PACKET):
+        """
+        Send data to all Anony client
+
+        Raises:
+            Exception: client CANNOT use this
+        """
+        if self.isClient:
+            raise Exception("Use send instead if you're using client.")
+        for client_sock in self.anonyclients:
+            self.send(data, client_sock, flag)
+
+    def sendTo(self, userID: str, data: str, flag: packet.flags = packet.flags.STRING_PACKET):
+        """
+        Send data to specific client
+
+        Raises:
+            Exception: client CANNOT use this
+        """
+        if self.isClient:
+            raise Exception("Use send instead if you're using client.")
+        self.send(data, self.clients[userID], flag)
+
     def send(self, data: str, sock: socket.socket = None, flag: packet.flags = packet.flags.STRING_PACKET):
         """
         Send data through socket
@@ -79,12 +105,15 @@ class network:
         """
         if sock == None and self.isClient:
             sock = self.socket
-        sock.sendall(int(flag.value).to_bytes(4, byteorder="little"))
-        # Send Socket Type Flags
-        sock.sendall(len(data.encode('utf-8')).to_bytes(4, byteorder="little"))
-        # Send Socket Byte Size At First with int(4 bytes) little endian
-        sock.sendall(data.encode('utf-8'))
-        # Send Data
+        try:
+            sock.sendall(int(flag.value).to_bytes(4, byteorder="little"))
+            # Send Socket Type Flags
+            sock.sendall(len(data.encode('utf-8')).to_bytes(4, byteorder="little"))
+            # Send Socket Byte Size At First with int(4 bytes) little endian
+            sock.sendall(data.encode('utf-8'))
+            # Send Data
+        except ConnectionResetError:
+            pass # TODO: handling disconnecting client
 
     def server(self, port: int, binder: Callable[[socket.socket, tuple], Any]):
         """
@@ -106,6 +135,24 @@ class network:
         server.daemon = True
         server.start()
 
+    def clientLoad(self, client_socket: socket.socket, binder: Callable[[socket.socket, tuple], Any], addr: tuple):
+        data, flag = self.receive(client_socket)
+        if flag == packet.flags.ID_HANDSHAKE:
+            if not data.decode('utf-8') in self.clients:
+                self.clients[data.decode('utf-8')] = client_socket
+            elif data.decode('utf-8') == "Anony":
+                self.anonyclients.append(client_socket)
+            else:
+                self.send("Not unique id.", client_socket, packet.flags.ERROR)
+                client_socket.close()
+                raise Exception("Not unique id, so didn't connecting.")
+            thread = threading.Thread(target=binder, args=(client_socket, addr, ))
+            thread.start()
+        else:
+            self.send("No id handshake.", client_socket, packet.flags.ERROR)
+            client_socket.close()
+            raise Exception("No id handshake, so didn't connecting.")
+
     def server_thread(self, binder: Callable[[socket.socket, tuple], Any]):
         """
         Client wait thread
@@ -116,13 +163,13 @@ class network:
         try:
             while True:
                 client_socket, addr = self.socket.accept()
-                self.clients[addr] = client_socket
-                thread = threading.Thread(target=binder, args=(client_socket, addr, ))
+                # self.clients[addr] = client_socket
+                thread = threading.Thread(target=self.clientLoad, args=(client_socket, binder, addr, ))
                 thread.start()
         finally:
             self.socket.close()
 
-    def client(self, host: str, port: int):
+    def client(self, host: str, port: int, id: str = None):
         """
         Setup Client
 
@@ -135,6 +182,9 @@ class network:
         self.isClient = True
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((host, int(port)))
+        if id == None:
+            id = "Anony" # It can be NOT unique!
+        self.send(id, None, packet.flags.ID_HANDSHAKE)
 
     def close(self):
         self.socket.close()

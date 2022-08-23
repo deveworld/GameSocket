@@ -1,4 +1,6 @@
 from enum import Enum
 
 class flags(Enum):
-    STRING_PACKET = 0
+    ID_HANDSHAKE = 0
+    ERROR = 1
+    STRING_PACKET = 2
