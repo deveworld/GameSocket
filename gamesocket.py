@@ -8,7 +8,6 @@ PORT = 12345
 
 def binder(sock: socket.socket, addr: tuple):
     sys.stdout.write('\rconnected: %s\nMe: ' % str(addr))
-    gs.network.start_receive(rece_handler, sock)
 
 def rece_handler(msg):
     sys.stdout.write('\rThe other: %s\nMe: ' % msg)
@@ -18,21 +17,23 @@ class gamesocket:
         self.network = network()
         self.port = port
 
-    def server(self, binder: Callable[[socket.socket, tuple], Any]):
-        self.network.server(self.port, binder)
+    def server(self):
+        self.network.set_client_binder(binder)
+        self.network.set_receive_handler(rece_handler)
+        self.network.server(self.port)
     
-    def client(self, host: str, str_handler: Callable[[str], Any]):
+    def client(self, host: str):
+        self.network.set_receive_handler(rece_handler)
         self.network.client(host, self.port)
-        self.network.start_receive(str_handler)
 
 if __name__ == "__main__":
     if input("s or c?: ") == "s":
         gs = gamesocket(PORT)
-        gs.server(binder)
+        gs.server()
         while True:
             gs.network.sendAll(input("Me: "))
     else:
         gs = gamesocket(PORT)
-        gs.client("localhost", rece_handler)
+        gs.client("localhost")
         while True:
             gs.network.send(input("Me: "))

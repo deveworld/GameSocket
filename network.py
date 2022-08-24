@@ -12,8 +12,36 @@ class network:
         self.isClient = False
         self.clients: Dict[str, socket.socket] = {}
         self.anonyclients: List[socket.socket] = []
+        self.receive_hadler: Callable[[str], Any] = None
+        self.client_binder: Callable[[socket.socket, tuple], Any] = None
 
-    def start_receive(self, str_handler: Callable[[str], Any], sock: socket.socket = None):
+    def set_receive_handler(self, receive_hadler: Callable[[str], Any]):
+        """Set receive handler
+
+        Args:
+            receive_hadler (Callable[[str], Any]): Receive str handler
+        """
+        self.receive_hadler = receive_hadler
+        if self.isServer or self.isClient:
+            raise ValueError('To change handler while running might be not safe')
+
+    def set_client_binder(self, client_binder: Callable[[socket.socket, tuple], Any]):
+        """Set client binder(it will be call once at connect client)
+
+        Args:
+            client_binder (Callable[[socket.socket, tuple], Any]): Client binder
+        """
+        self.client_binder = client_binder
+        if self.isServer or self.isClient:
+            raise ValueError('To change handler while running might be not safe')
+
+    def disconnected(self, sock: socket.socket):
+        try:
+            self.clients = {key:val for key, val in self.clients.items() if val == sock}
+        except ValueError or KeyError:
+            self.anonyclients.pop(self.anonyclients.index(sock))
+
+    def start_receive(self, sock: socket.socket = None):
         """Start receive loop in other thread
 
         Args:
@@ -22,7 +50,7 @@ class network:
         """
         if self.isClient:
             sock = self.socket
-        receiver = threading.Thread(target=self.receiveLoop, args=(sock, str_handler, ))
+        receiver = threading.Thread(target=self.receiveLoop, args=(sock, ))
         receiver.daemon = True
         receiver.start()
 
@@ -41,13 +69,12 @@ class network:
             length = int.from_bytes(sock.recv(4), "little")
             data: bytes = sock.recv(length)
         except ConnectionResetError:
-            raise Exception('Disconnected') # TODO: handling disconnecting client
-        if not data:
-            raise ValueError('Receive error')
+            self.disconnected(sock)
         else:
             return (data, flag)
+        return ("Disconnected".encode('utf-8'), packet.flags.ERROR) # Not Real Packet!!
 
-    def receiveLoop(self, sock: socket.socket, str_handler: Callable[[str], Any]):
+    def receiveLoop(self, sock: socket.socket):
         """
         Receiving Loop
 
@@ -58,7 +85,12 @@ class network:
         while True:
             data, flag = self.receive(sock)
             if flag == packet.flags.STRING_PACKET:
-                str_handler(data.decode('utf-8'))
+                if self.receive_hadler != None:
+                    self.receive_hadler(data.decode('utf-8'))
+            elif flag == packet.flags.ERROR:
+                if self.receive_hadler != None:
+                    self.receive_hadler(data.decode('utf-8'))
+                break
 
     def sendAll(self, data: str, flag: packet.flags = packet.flags.STRING_PACKET):
         """
@@ -113,9 +145,9 @@ class network:
             sock.sendall(data.encode('utf-8'))
             # Send Data
         except ConnectionResetError:
-            pass # TODO: handling disconnecting client
+            self.disconnected(sock)
 
-    def server(self, port: int, binder: Callable[[socket.socket, tuple], Any]):
+    def server(self, port: int):
         """
         Setup Server
 
@@ -131,11 +163,11 @@ class network:
         self.socket.bind(('', int(port)))
         self.socket.listen()
 
-        server = threading.Thread(target=self.server_thread, args=(binder, ))
+        server = threading.Thread(target=self.server_thread)
         server.daemon = True
         server.start()
 
-    def clientLoad(self, client_socket: socket.socket, binder: Callable[[socket.socket, tuple], Any], addr: tuple):
+    def clientLoad(self, client_socket: socket.socket, addr: tuple):
         data, flag = self.receive(client_socket)
         if flag == packet.flags.ID_HANDSHAKE:
             if not data.decode('utf-8') in self.clients:
@@ -146,14 +178,16 @@ class network:
                 self.send("Not unique id.", client_socket, packet.flags.ERROR)
                 client_socket.close()
                 raise Exception("Not unique id, so didn't connecting.")
-            thread = threading.Thread(target=binder, args=(client_socket, addr, ))
-            thread.start()
+            self.start_receive(client_socket)
+            if self.client_binder != None:
+                thread = threading.Thread(target=self.client_binder, args=(client_socket, addr, ))
+                thread.start()
         else:
             self.send("No id handshake.", client_socket, packet.flags.ERROR)
             client_socket.close()
             raise Exception("No id handshake, so didn't connecting.")
 
-    def server_thread(self, binder: Callable[[socket.socket, tuple], Any]):
+    def server_thread(self):
         """
         Client wait thread
 
@@ -163,8 +197,7 @@ class network:
         try:
             while True:
                 client_socket, addr = self.socket.accept()
-                # self.clients[addr] = client_socket
-                thread = threading.Thread(target=self.clientLoad, args=(client_socket, binder, addr, ))
+                thread = threading.Thread(target=self.clientLoad, args=(client_socket, addr, ))
                 thread.start()
         finally:
             self.socket.close()
@@ -185,6 +218,7 @@ class network:
         if id == None:
             id = "Anony" # It can be NOT unique!
         self.send(id, None, packet.flags.ID_HANDSHAKE)
+        self.start_receive()
 
     def close(self):
         self.socket.close()
