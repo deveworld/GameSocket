@@ -1,6 +1,4 @@
-from http import client
 import socket
-from struct import pack
 import threading
 import packet
 from typing import Callable, Any, Dict, Tuple, List
@@ -10,18 +8,44 @@ class network:
         self.socket: socket.socket = None
         self.isServer = False
         self.isClient = False
+        self.allowAnony = False
         self.clients: Dict[str, socket.socket] = {}
         self.anonyclients: List[socket.socket] = []
-        self.receive_hadler: Callable[[str], Any] = None
+        self.str_receive_hadler: Callable[[str], Any] = None
+        self.error_receive_hadler: Callable[[str], Any] = None
         self.client_binder: Callable[[socket.socket, tuple], Any] = None
 
-    def set_receive_handler(self, receive_hadler: Callable[[str], Any]):
-        """Set receive handler
+    def set_allowAnony(self, allowAnony: bool):
+        """Allow or Deny Anony
 
         Args:
-            receive_hadler (Callable[[str], Any]): Receive str handler
+            allowAnony (bool): True is allow, False is deny
         """
-        self.receive_hadler = receive_hadler
+        self.allowAnony = allowAnony
+        if self.isServer or self.isClient:
+            if self.allowAnony == False:
+                self.sendAllAnony("Server change policy to denying anony.", packet.flags.ERROR)
+                for anony_socket in self.anonyclients:
+                    anony_socket.close()
+            raise ValueError('To change policy while running might be not safe')
+
+    def set_str_receive_handler(self, str_receive_hadler: Callable[[str], Any]):
+        """Set str packet receive handler
+
+        Args:
+            str_receive_hadler (Callable[[str], Any]): Receive str handler
+        """
+        self.str_receive_hadler = str_receive_hadler
+        if self.isServer or self.isClient:
+            raise ValueError('To change handler while running might be not safe')
+
+    def set_error_receive_handler(self, error_receive_hadler: Callable[[str], Any]):
+        """Set error packet receive handler
+
+        Args:
+            error_receive_hadler (Callable[[str], Any]): Receive error str handler
+        """
+        self.error_receive_hadler = error_receive_hadler
         if self.isServer or self.isClient:
             raise ValueError('To change handler while running might be not safe')
 
@@ -85,11 +109,11 @@ class network:
         while True:
             data, flag = self.receive(sock)
             if flag == packet.flags.STRING_PACKET:
-                if self.receive_hadler != None:
-                    self.receive_hadler(data.decode('utf-8'))
+                if self.str_receive_hadler != None:
+                    self.str_receive_hadler(data.decode('utf-8'))
             elif flag == packet.flags.ERROR:
-                if self.receive_hadler != None:
-                    self.receive_hadler(data.decode('utf-8'))
+                if self.error_receive_hadler != None:
+                    self.error_receive_hadler(data.decode('utf-8'))
                 break
 
     def sendAll(self, data: str, flag: packet.flags = packet.flags.STRING_PACKET):
@@ -173,11 +197,18 @@ class network:
             if not data.decode('utf-8') in self.clients:
                 self.clients[data.decode('utf-8')] = client_socket
             elif data.decode('utf-8') == "Anony":
-                self.anonyclients.append(client_socket)
+                if self.allowAnony:
+                    self.anonyclients.append(client_socket)
+                else:
+                    self.send("Server deny Anony.", client_socket, packet.flags.ERROR)
+                    client_socket.close()
+                    self.error_receive_hadler("Server is denying Anony, so didn't connecting.")
+                    return
             else:
                 self.send("Not unique id.", client_socket, packet.flags.ERROR)
                 client_socket.close()
-                raise Exception("Not unique id, so didn't connecting.")
+                self.error_receive_hadler("Not unique id, so didn't connecting.")
+                return
             self.start_receive(client_socket)
             if self.client_binder != None:
                 thread = threading.Thread(target=self.client_binder, args=(client_socket, addr, ))
@@ -185,7 +216,8 @@ class network:
         else:
             self.send("No id handshake.", client_socket, packet.flags.ERROR)
             client_socket.close()
-            raise Exception("No id handshake, so didn't connecting.")
+            self.error_receive_hadler("No id handshake, so didn't connecting.")
+            return
 
     def server_thread(self):
         """
